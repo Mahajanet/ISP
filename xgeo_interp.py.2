@@ -1,0 +1,492 @@
+#!/usr/bin/python3
+
+import xarray as xa
+import math
+import numpy as np
+from numpy import linalg as LA
+from datetime import date
+from pathlib import Path
+
+import xgeo_read as xr
+import global_vars as g
+
+
+#-------------------------------------------------------------------------------
+
+
+def find_row_col(x, y, map_dir):
+
+    """ Find the i, j-indices and avg. elevation of the nearest SeNorge cell.
+
+	It is assumed that there is a data set "seNorge2_dem_UTM33.nc" in NetCDF
+	format in the folder pointed to by map_dir, which contains the x- and
+    y-coordinates and avg. elevations of all cells in the SeNorge data set.
+    The coordinates x, y must be projected in UTM33N.
+
+    Input:
+        x, y		Easting and northing coordinates of the point in question
+    Output:
+        row, col	Southing (i) and easting (j) indices of the SeNorge cell
+        			that contains (x,y)
+        elevation	Avg. elevation of the SeNorge cell that contains (x,y)
+
+    2021-??-??	SGl	Function created.
+    2021-08-04	DI	Added doc-string.
+    2023-10-19	DI	seNorge2_dem_UTC33.nc could not be read unless NAKSIN is
+    				started from specific directory. Assume now the file to be
+    				in map_dir, which is passed as a new parameter.
+    """
+
+    ncdf = Path(map_dir) / "seNorge2_dem_UTM33.nc"
+    ds = xa.open_dataset(ncdf)
+    dem = np.array(ds["elevation"])
+    xgrid = np.array(ds["easting"])
+    ygrid = np.array(ds["northing"])
+
+    xdiff = np.abs(xgrid - x)
+    ydiff = np.abs(ygrid - y)
+
+    col = np.where(xdiff == np.amin(xdiff))[0][0]
+    row = np.where(ydiff == np.amin(ydiff))[0][0]
+    elevation = dem[row, col]
+
+    return row, col, elevation
+
+
+#-------------------------------------------------------------------------------
+
+
+def find_row_col_neighbor(x, y, z, i, j, map_dir, RA=0):
+
+    """Find nearest SeNorge cell to a given point and grid offset.
+
+	It is assumed that there is a data set "seNorge2_dem_UTM33.nc" in NetCDF
+	format in the folder map_data, which contains the x- and y-coordinates
+	and avg. elevations of all cells in the SeNorge data set.
+    The coordinates x, y must be projected in UTM33N.
+
+    Input:
+        x, y, z		Easting, northing coordinates and altitude of the point
+        			in question
+        i, j		Offset from (x,y) in SeNorge grid units (1 km)
+    Output:
+        row, col	Southing (i) and easting (j) indices of the SeNorge cell
+        			that contains (x+j*cs_SN ,y+i*cs_SN), with cs_SN = 1 km
+        elevation	Avg. elevation of the SeNorge cell that contains
+                    (x+j*cs_SN, y+i*cs_SN)
+        xg, yg, zg	3D coordinates of the nearest SeNorge cell (zg = elevation)
+
+    2021-??-??	SGl	(?)	Function created.
+    2021-08-04	DI	Added doc-string.
+    2023-10-19	DI	seNorge2_dem_UTC33.nc could not be read unless NAKSIN is
+    				started from specific directory. Assume now the file to be
+    				in g.map_dir.
+    """
+
+    ncdf = Path(map_dir) / "seNorge2_dem_UTM33.nc"
+    cs_SN = 1000.0                      # Cell size of SeNorge data set
+
+    ds = xa.open_dataset(ncdf)
+    dem = np.array(ds["elevation"])
+    xgrid = np.array(ds["easting"])
+    ygrid = np.array(ds["northing"])
+
+    xdiff = np.abs(xgrid - (x+(j-1)*cs_SN))
+###DI	It seems the SeNorge DEM is organized with i oncreasing southwards.
+###DI	This means we get the cell containing the point i km *south* and j km
+###DI	east of (x,y). Is this what is intended, or should it be
+###DI	y - (i-1)*cs_SN in the code line below?
+    ydiff = np.abs(ygrid - (y+(i-1)*cs_SN))
+
+    col = np.where(xdiff == np.amin(xdiff))[0][0]
+    row = np.where(ydiff == np.amin(ydiff))[0][0]
+    elevation = dem[row, col]
+
+    xg = xgrid[col]
+    yg = ygrid[row]
+    zg = elevation
+
+    return row, col, elevation, xg, yg, zg
+
+
+#-------------------------------------------------------------------------------
+
+
+def mask_nan(lista):
+
+    """Purge the input "matrix" (list of lists) from all rows that contain NaN.
+
+        Input:
+            lista		List of NumPy arrays of equal length
+        Output:
+        	masked_list	List of NumPy arrays of equal length, with "columns"
+        				deleted in which there originally was at least one NaN
+
+    2021-??-??	SGl	First version of function
+    2021-08-11	DI	Added doc-string. Check for empty input list. Simplified
+    				code by starting from an np.ones array as nan_mask.
+    """
+
+    # Check first whether there is data in the input list:
+    if len(lista) == 0 or len(lista[0]) == 0:
+        return [np.array([]), np.array([]), np.array([]),
+                np.array([]), np.array([]), np.array([])]
+
+    nan_mask = np.ones(len(lista[0]), dtype=bool)
+    for item in lista[1:]:
+        nan_mask *= np.logical_not(np.isnan(item))
+
+    masked_list = []
+    for item in lista:
+        masked_list.append(item[nan_mask])
+
+    return masked_list
+
+
+#-------------------------------------------------------------------------------
+
+
+def xgeo_interp_onecell(x,y):
+
+    """Retrieval of climate data from SeNorge without interpolation"""
+
+    t, TA, RR, HS, HNW, SWE, altitude = xr.xgeo_read(x,y)
+
+    return t, TA, RR, HS, HNW, SWE
+
+
+#-------------------------------------------------------------------------------
+
+
+def xgeo_interp_SGl(xp, yp, zmax, map_dir, RA, noSNcells):
+
+    """Interpolation of climate data according to Sylfest Glimsdal.
+
+    Input:
+    	xp, yp, zmax	Center (x,y) and top (z) coordinates of PRA
+        map_dir         Folder containing seNorge2_dem_UTC33.nc
+    	RA				Label number of PRA
+    	noSNcells		Maximum number of successful downloads from xgeo.no
+    Output:
+        t, TA, RR, 		NumPy arrays for date, air temperature, precipitation,
+        HS, HNW, SWE	snow depth, water equivalent of new-snow and snow cover
+
+    2021-??-??	SGl	First version
+    2021-08-14	DI	Added download diagnostics.
+    2021-08-26	DI	Check whether valid data, return empty arrays if not.
+    2023-10-19  DI  For compatibility with MS Windows, receive the parameter
+                    map_dir and pass it to find_row_col(_neighbor).
+    """
+
+
+    row, col, zp = find_row_col(xp, yp, map_dir)
+
+    rown      = np.zeros([3,3])
+    coln      = np.zeros([3,3])
+    elevation = np.zeros([3,3])
+    xg        = np.zeros([3,3])
+    yg        = np.zeros([3,3])
+    zg        = np.zeros([3,3])
+    rdis      = np.zeros([3,3])
+
+    for i in range(3):
+        for j in range(3):
+            rown[i,j], coln[i,j], elevation[i,j], xg[i,j], yg[i,j], zg[i,j] \
+                = find_row_col_neighbor(xp, yp, zp, i, j, map_dir, RA)
+            rdis[i,j] = math.dist([xg[i,j], yg[i,j]], [xp,yp])
+
+    # i,j-ranges of interest:
+    ioi = np.where(abs(yg[:,0] - yp) <= 1000.0)[0]
+    joi = np.where(abs(xg[0,:] - xp) <= 1000.0)[0]
+
+    rows = rown[:,0]
+    cols = coln[0,:]
+
+    # Sort cells by difference in height measured against zmax, first above
+    # zmax, then below
+    xg = xg.flatten()
+    yg = yg.flatten()
+    zg = zg.flatten()
+    elevation = elevation.flatten()
+    rdis = rdis.flatten()
+    diff_height = elevation - zmax
+    diff_height = np.delete(diff_height,
+                            np.where(np.isnan(diff_height)))
+    # Check whether there is valid data, if not return:
+    if not len(diff_height):
+        t = TA = RR = HS = HNW = SWE = np.array([])
+        return t, TA, RR, HS, HNW, SWE
+
+    # Sorted mask from lowest to highest value, may contain NaN
+    mask = np.argsort(diff_height)
+
+    # First index in sorted array with same altitude or higher
+    try:
+        ix = np.argmax(diff_height[mask] >= 0.0)
+    except:
+        print("RA{:04d}:  mask =".format(RA), mask)
+        print("    diff_height =", diff_height[mask])
+        quit()
+    lend = len(diff_height)
+
+    # Reorganize mask so that altitudes equal or higher come first,
+    # then altitudes lower than zmax, with the lowest as last entry.
+    new_mask = mask.copy()
+    if not (ix == 0 or ix == lend):
+        above = lend - ix  #length of slice with positive diff in altitude
+        # Start with the positive diffs first, the closest to zmax
+        new_mask[0:above] = mask[ix:]
+
+        # Fill with the rest (negative diff) from value closest to zero to
+        # larger negative values
+        new_mask[above:lend] = np.flip(mask[0:ix])
+
+    # If all diffs are negative, start with value closest to zero
+    if diff_height[new_mask][0] < 0.0:
+        new_mask = np.flip(new_mask)
+
+    diff_height = diff_height[new_mask]
+
+
+    # Reorgangize data with new mask:
+    xg = xg[new_mask]
+    yg = yg[new_mask]
+    zg = zg[new_mask]
+    elevation = elevation[new_mask]
+    rdis = np.abs(rdis[new_mask])
+    weights = []
+    stats = []
+    zval = []
+    alpha = 3.0
+    Rp = 500.0
+    #print(xg), print(yg), print(zg), print(elevation)
+
+    # Reading weather from at most noSNcells
+    count = 0
+    found = 0
+    while found < noSNcells and count < len(elevation):
+        x = xg[count]
+        y = yg[count]
+        z = zg[count]
+        if not float(z) == 0.0:
+            try:
+                cell_data = xr.xgeo_read(x, y, RA)
+            except:
+                print(12*' ' + "RA{:04d}:  Download failed at    ".format(RA) + "({:.0f}, {:.0f}, {:4.0f}).".format(x, y, z))
+                count += 1
+                continue
+            print(12*' ' + "RA{:04d}:  Download succeeded at ".format(RA) +
+                  "({:.0f}, {:.0f}, {:4.0f}).".format(x, y, z))
+            stats.append(cell_data)
+            weight = np.exp(-0.5*np.power((rdis[count])/Rp, 2))
+            weights.append(weight)
+            zval.append(z)
+            found += 1
+        count += 1
+
+    w = np.array(weights)
+    if len(w) > 0:                      # Data has been found
+        w = w / np.sum(w)
+###DI	We want to get the lapse rate from the data!!!
+        # Multiply weather data with weights and sum up
+        gradT = -0.5/100                # Temperature gradient
+
+        for i in range(len(w)):
+            # Read weather from stats-list
+            t, ta, rr, sd, fsw, swe, altitude = stats[i]
+            if i == 0:
+                # Initialise fields
+                HS  = w[i] * sd
+                HNW = w[i] * fsw
+                TA  = w[i] * (ta + gradT*(zval[i]-altitude))
+                RR  = w[i] * rr
+                SWE = w[i] * swe
+            else:
+                HS  += w[i] * sd
+                HNW += w[i] * fsw
+                TA  += w[i] * (ta + gradT*(zval[i]-altitude))
+                RR  += w[i] * rr
+                SWE += w[i] * swe
+
+    else:                               # No valid data has been found
+        t = TA = RR = HS = HNW = SWE = np.array([])
+
+###DI	If noSNcells > 1, t will be stats[len(w)-1][0][:]. This is fine if it
+###DI	is the same for all principal rows of the 3D-array stats. But do we
+###DI	know that this is always the case?
+
+    return t, TA, RR, HS, HNW, SWE
+
+
+#-------------------------------------------------------------------------------
+
+
+def xgeo_interp_PG(xp, yp, map_dir):
+
+    """Interpolation according to Peter Gauer
+
+    2023-10-19  DI  Receive and pass new parameter map_dir.
+    """
+
+    row, col, zp = find_row_col(xp, yp, map_dir)
+
+    rown      = np.zeros([3,3])
+    coln      = np.zeros([3,3])
+    elevation = np.zeros([3,3])
+    xg        = np.zeros([3,3])
+    yg        = np.zeros([3,3])
+    zg        = np.zeros([3,3])
+    rdis      = np.zeros([3,3])
+
+    for i in range(3):
+        for j in range(3):
+            rown[i,j], coln[i,j], elevation[i,j], xg[i,j], yg[i,j], zg[i,j] \
+                = find_row_col_neighbor(xp, yp, zp, map_dir, i, j)
+            rdis[i,j] = math.dist([xg[i,j], yg[i,j]], [xp,yp])
+
+    # i and j-ranges of interest
+    ioi = np.where(abs(yg[:,0] - yp) <= 1000.0)[0]
+    joi = np.where(abs(xg[0,:] - xp) <= 1000.0)[0]
+
+    rows = rown[ioi, 0]
+    cols = coln[0, joi]
+
+    # Weigthing with a Gaussian filter
+    # Thornton, P. E.; Running, S. W. & White, M. A. (1997).
+    # Generating surfaces of daily meteorological variables over large regions
+    # of complex terrain. Journal of Hydrology, 190, 214--251.
+
+    Rp = 1000  # cut-off Radius
+    alpha = 3  # parameter
+
+    wgt = np.zeros([2,2])
+    xg1 = np.zeros([2,2])
+    yg1 = np.zeros([2,2])
+    zg1 = np.zeros([2,2])
+
+    for i in range(2):
+        for j in range(2):
+
+            x =  xg[ioi[i], joi[j]]
+            y =  yg[ioi[i], joi[j]]
+            # If data do not exist, use zero weight
+            wgt[i,j] = 0.0
+            if elevation[ioi[i], joi[j]] > 0.0: # Data should exist
+                wgt[i,j] = np.maximum(
+                               np.exp(-alpha*np.power(
+                                          rdis[ioi[i], joi[j]]/Rp, 2)) \
+                                   - np.exp(-alpha),
+                               0.0)
+            xg1[i,j] = xg[ioi[i], joi[j]]
+            yg1[i,j] = yg[ioi[i], joi[j]]
+            zg1[i,j] = elevation[ioi[i], joi[j]]
+
+    # Normalize weights
+    r = wgt.flatten()
+    wgt = wgt / sum(r)
+
+    gradT = -0.5/100                    # Temperature gradient
+
+    count=0
+    for i in range(2):
+        for j in range(2):
+            if wgt[i,j]:
+                x = xg1[i,j]
+                y = yg1[i,j]
+                t, ta, rr, sd, fsw, swe, altitude = xr.xgeo_read(x,y)
+                if count == 0:
+                    HS  = wgt[i,j] * sd
+                    HNW = wgt[i,j] * fsw
+                    TA  = wgt[i,j] * (ta + gradT*(zp-altitude))
+                    RR  = wgt[i,j] * rr
+                    SWE = wgt[i,j] * swe
+                else:
+                    HS  += wgt[i,j] * sd
+                    HNW += wgt[i,j] * fsw
+                    TA  += wgt[i,j] * (ta + gradT*(zp-altitude))
+                    RR  += wgt[i,j] * rr
+                    SWE += wgt[i,j] * swe
+                count+=1
+
+    return t, TA, RR, HS, HNW, SWE
+
+
+#-------------------------------------------------------------------------------
+
+
+def xgeo_interp(x, y, zmax, map_dir, RA, typ="SGl", noSNcells=1):
+
+    if typ == "PG":
+        lista = xgeo_interp_PG(x,y, map_dir)
+    elif typ == "SGl":
+        lista = xgeo_interp_SGl(x, y, zmax, map_dir, RA, noSNcells)
+    elif typ == "onecell":
+        lista = xgeo_interp_onecell(x, y)
+
+    # Mask out days without valid data
+    t, TA, RR, HS, HNW, SWE = mask_nan(lista)
+
+    return t, TA, RR, HS, HNW, SWE
+
+
+#########################
+# MAIN - TEST OF MODULE #
+#########################
+
+
+if __name__== '__main__':
+
+    import time
+
+    start = time.time()
+
+    #knutstugrovi
+    #x =  158488
+    #y = 6873765
+    #zmax = 1290
+
+    # ???
+    #x =  342976.77777777775
+    #y = 6802669.222222222
+    #zmax =
+
+    # ???
+    #x =  465500
+    #y = 7571500
+    #zmax =
+
+    #leknes
+    #x =  438630
+    #y = 7563560
+    #zmax =  390
+
+    # ???
+    #x =  457598
+    #y = 7560588
+    #zmax =
+
+    # Ytre Vardøy V  (There is no SeNorge temperature data in 9 neighbor cells.)
+    #x    =  370565
+    #y    = 7323765
+    #zmax =      44
+
+    # 17272 Skipsbåtvær, PRA 41
+    x    =  372671
+    y    = 7321460
+    zmax =      47
+    
+    x=185500
+    y=7034500
+    zmax=200
+
+    t, TA, RR, HS, HNW, SWE = xgeo_interp(x, y, zmax, 1, typ="SGl", noSNcells=1)
+    #t, TA, RR, HS, HNW, SWE = xgeo_interp(x, y, zmax, 1, typ="onecell")
+    #t, TA, RR, HS, HNW, SWE = xgeo_interp(x, y, zmax, 1, typ="PG")
+    if len(HS) > 0:
+        print("mean HS", np.mean(HS))
+    else:
+        print("Sorry, your humble servant failed to obtain data for HS :-(\n")
+    #print("len", len(t), len(TA), len(RR), len(HS))
+
+    end = time.time()
+    print("Total CPU-time [s]", end-start)
