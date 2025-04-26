@@ -1,12 +1,12 @@
 import os
 import xarray as xr
-import numpy as np
+import numpy as np #Not yet used
 
 # Directory where the GRIB files are stored
-input_dir = "V:/vedur/reikn/CARRA_ISL/T2M/t2m_3hr/one_year_per_gribfile"
-output_dir = "V:/ofanflod/verk/vakt/steph/python/jahnavi/t2m_isa"
+input_dir = "V:/vedur/reikn/CARRA_ISL/T2M/t2m_3hr/one_year_per_gribfile" #I don't have this on me
+output_dir = "user/jahnavi/mahajan/projects/ISP"
 
-# GPS coordinates for Ísafjörður
+# GPS coordinates for Ísafjörður (for now)
 lat_target = 66.0596
 lon_target = -23.1699
 
