@@ -102,7 +102,7 @@ def apply_gaussian(target, coords, values, times, varname, station_elev):
 # ------------------ MAIN ------------------
 
 methods = ["elevation_adjusted", "idw", "kriging", "gaussian"]
-output_root = "./output"
+output_root = "V:/ofanflod/verk/vakt/steph/python/jahnavi/output"
 created_dirs = set()
 
 for var_key, var_info in variables.items():
