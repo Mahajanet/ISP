@@ -6,7 +6,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 import numpy as np
 
 # --- Load and combine CARRA NetCDF files ---
-carra_files = sorted(glob("/Users/jahnavimahajan/Projects/ISP/Steph/precip_nn/precip_isa_nn/pr_isa_*.nc")) 
+carra_files = sorted(glob("/Users/jahnavimahajan/Projects/ISP/raw_data/nn/precip_nn/precip_isa_nn/pr_isa_*.nc")) 
 carra_datasets = [xr.open_dataset(fp) for fp in carra_files]
 carra_combined = xr.concat(carra_datasets, dim='time')
 
