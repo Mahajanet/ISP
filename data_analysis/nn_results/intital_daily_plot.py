@@ -7,6 +7,8 @@ import numpy as np
 
 # --- Load and combine CARRA NetCDF files ---
 carra_files = sorted(glob("/Users/jahnavimahajan/Projects/ISP/raw_data/nn/precip_nn/precip_isa_nn/pr_isa_*.nc")) 
+if not carra_files:
+    raise FileNotFoundError("No NetCDF files found matching pattern: pr_isa_*.nc in precip_isa_nn/")
 carra_datasets = [xr.open_dataset(fp) for fp in carra_files]
 carra_combined = xr.concat(carra_datasets, dim='time')
 
@@ -16,7 +18,7 @@ carra_df = pd.DataFrame({'pr': carra_combined['pr'].values}, index=carra_time)
 carra_daily = carra_df['pr'].resample('D').sum()
 
 # --- Load Excel in situ data (IMO format) ---
-excel_path = "/Users/jahnavimahajan/Projects/ISP/Steph/Jahnavi_Weatherdata_IMO_20250428.xlsx"  
+excel_path = "/Users/jahnavimahajan/Projects/ISP/raw_data/in_situ.xlsx"  
 df_in_situ = pd.read_excel(excel_path, sheet_name='Observations - 2642')
 
 # Convert to datetime and set index
