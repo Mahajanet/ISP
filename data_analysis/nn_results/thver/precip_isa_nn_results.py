@@ -43,7 +43,7 @@ print(f"Bias (CARRA - In Situ): {bias:.2f} mm")
 plt.figure(figsize=(15, 6))
 plt.plot(aligned.index, aligned['CARRA'], label='CARRA (Nearest Neighbor)', alpha=0.7)
 plt.plot(aligned.index, aligned['In_Situ'], label='In Situ (Assumed Zero)', alpha=0.7, linestyle='--')
-plt.title("Daily Precipitation: CARRA vs Zero Baseline (Þverfjall)")
+plt.title("Fig 3.1.3 – Daily Precipitation: CARRA vs In Situ (Þverfjall)")
 plt.ylabel("Precipitation (mm)")
 plt.xlabel("Date")
 plt.legend()
@@ -52,22 +52,22 @@ plt.tight_layout()
 plt.show()
 
 # --- Plot 2: Metrics as Bar Chart ---
-metrics = [mae, rmse, bias]
-labels = ['MAE', 'RMSE', 'Bias']
-colors = ['skyblue', 'salmon', 'violet']
+# metrics = [mae, rmse, bias]
+# labels = ['MAE', 'RMSE', 'Bias']
+# colors = ['skyblue', 'salmon', 'violet']
 
-plt.figure(figsize=(8, 5))
-plt.bar(labels, metrics, color=colors)
-plt.title("CARRA vs Zero Baseline - Statistical Comparison (Þverfjall Precip)")
-plt.ylabel("Value")
-plt.grid(axis='y')
-plt.tight_layout()
-plt.show()
+# plt.figure(figsize=(8, 5))
+# plt.bar(labels, metrics, color=colors)
+# plt.title("CARRA vs Zero Baseline - Statistical Comparison (Þverfjall Precip)")
+# plt.ylabel("Value")
+# plt.grid(axis='y')
+# plt.tight_layout()
+# plt.show()
 
 # --- Plot 3: Scatter Plot ---
 plt.figure(figsize=(6, 6))
 plt.scatter(aligned['In_Situ'], aligned['CARRA'], alpha=0.5)
-plt.title("Scatter: CARRA vs Zero Baseline Precipitation (Þverfjall)")
+plt.title("Fig 3.1.2 – Scatter: CARRA vs Baseline In Situ Precipitation (Þverfjall)")
 plt.xlabel("In Situ (0 mm)")
 plt.ylabel("CARRA (mm)")
 plt.grid(True)

@@ -51,7 +51,7 @@ print(f"Bias (CARRA - In Situ): {bias:.2f} °C")
 plt.figure(figsize=(15, 6))
 plt.plot(aligned.index, aligned['CARRA'], label='CARRA (Nearest Neighbor)', alpha=0.7)
 plt.plot(aligned.index, aligned['In_Situ'], label='In Situ (Station 2642)', alpha=0.7)
-plt.title("Daily 2m Temperature: CARRA vs In Situ (Ísafjörður)")
+plt.title("Fig 3.1.4 Daily 2m Temperature: CARRA vs In Situ (Ísafjörður)")
 plt.ylabel("Temperature (°C)")
 plt.xlabel("Date")
 plt.legend()
@@ -59,18 +59,18 @@ plt.grid(True)
 plt.tight_layout()
 plt.show()
 
-# --- Plot 2: Metrics as Bar Chart ---
-metrics = [mae, rmse, correlation, bias]
-labels = ['MAE', 'RMSE', 'Correlation', 'Bias']
-colors = ['skyblue', 'salmon', 'lightgreen', 'violet']
+# # --- Plot 2: Metrics as Bar Chart ---
+# metrics = [mae, rmse, correlation, bias]
+# labels = ['MAE', 'RMSE', 'Correlation', 'Bias']
+# colors = ['skyblue', 'salmon', 'lightgreen', 'violet']
 
-plt.figure(figsize=(8, 5))
-plt.bar(labels, metrics, color=colors)
-plt.title("CARRA vs In Situ - Temperature Statistical Comparison")
-plt.ylabel("Value")
-plt.grid(axis='y')
-plt.tight_layout()
-plt.show()
+# plt.figure(figsize=(8, 5))
+# plt.bar(labels, metrics, color=colors)
+# plt.title("CARRA vs In Situ - Temperature Statistical Comparison")
+# plt.ylabel("Value")
+# plt.grid(axis='y')
+# plt.tight_layout()
+# plt.show()
 
 # --- Plot 3: Scatter Plot ---
 plt.figure(figsize=(6, 6))
@@ -78,7 +78,7 @@ plt.scatter(aligned['In_Situ'], aligned['CARRA'], alpha=0.5)
 min_temp = min(aligned.min())
 max_temp = max(aligned.max())
 plt.plot([min_temp, max_temp], [min_temp, max_temp], 'r--', label="Perfect Agreement")
-plt.title("Scatter: CARRA vs In Situ Temperature")
+plt.title("Fig 3.1.5 Scatter: CARRA vs In Situ Temperature (Ísafjörður)")
 plt.xlabel("In Situ (°C)")
 plt.ylabel("CARRA (°C)")
 plt.legend()
