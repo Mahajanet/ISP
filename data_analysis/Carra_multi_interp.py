@@ -38,8 +38,8 @@ variables = {
 }
 
 stations = {
-    "isa": {"lat": 66.0596, "lon": -23.1699, "elevation": 20},
-    "thver": {"lat": 66.0444, "lon": -23.3074, "elevation": 275}
+    "isa": {"lat": 66.0596, "lon": -23.1699, "elevation": 2.2},
+    "thver": {"lat": 66.0444, "lon": -23.3074, "elevation": 741.0}
 }
 
 radius_km = 50
