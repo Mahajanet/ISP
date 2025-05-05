@@ -14,39 +14,54 @@ variables = {
     "t2m": {
         "input_dir": "V:/vedur/reikn/CARRA_ISL/T2M/t2m_3hr/one_year_per_gribfile",
         "file_prefix": "CF_T2M_ISL",
-        "var_name": "t2m",
-        "elev_method": True
+        "var_name": "t2m"
+    },
+    "wdir10": {
+        "input_dir": "V:/vedur/reikn/CARRA_ISL/D10m/d10m_3hr/one_year_per_gribfile",
+        "file_prefix": "CF_D10m",
+        "var_name": "wdir10"
+    },
+    "si10": {
+        "input_dir": "V:/vedur/reikn/CARRA_ISL/F10m/f10m_3hr/one_year_per_gribfile",
+        "file_prefix": "CF_F10m",
+        "var_name": "si10"
+    },
+    "pr": {
+        "input_dir": "V:/vedur/reikn/CARRA_ISL/PR/pr_3hr/Monthly_files",
+        "file_prefix": "CF_PR_",
+        "var_name": "pr"
     }
 }
 
 stations = {
-    "isa": {"lat": 66.0596, "lon": -23.1699, "elevation": 2.2},
-    "thver": {"lat": 66.0444, "lon": -23.3074, "elevation": 741.0}
+    "isa": {"lat": 66.0596, "lon": -23.1699},
+    "thver": {"lat": 66.0444, "lon": -23.3074}
 }
 
 output_root = "V:/ofanflod/verk/vakt/steph/python/jahnavi/output"
 radius_km = 50
 max_kriging_points = 200
 years = list(range(2020, 2025))
-created_dirs = set()
+months = pd.date_range(start="2020-01", end="2025-01", freq="MS").strftime("%Y-%m").tolist()
 
 # ------------------ HELPERS ------------------
 
 def get_file_path(var_info, date, suffix):
     return os.path.join(var_info["input_dir"], f"{var_info['file_prefix']}{date}{suffix}")
 
-def make_output_dir(out_dir):
-    if out_dir not in created_dirs:
-        os.makedirs(out_dir, exist_ok=True)
-        print(f"      Created folder: {out_dir}")
-        created_dirs.add(out_dir)
+def make_output_dir(path):
+    os.makedirs(path, exist_ok=True)
 
 def open_dataset(file_path, suffix):
-    return xr.open_dataset(
+    ds = xr.open_dataset(
         file_path,
         engine="cfgrib" if suffix == ".grib" else None,
         backend_kwargs={'indexpath': ''} if suffix == ".grib" else None
     )
+    if "longitude" in ds.coords:
+        ds = ds.assign_coords(longitude=(((ds.longitude + 180) % 360) - 180))
+        ds = ds.sortby("longitude")
+    return ds
 
 def get_variable(ds, varname, lat, lon, timestep=None):
     try:
@@ -55,94 +70,93 @@ def get_variable(ds, varname, lat, lon, timestep=None):
     except:
         return None
 
-def apply_kriging(target, coords, values, times):
-    estimates = []
-    for t in range(min(1, len(times))):
-        v = np.array([d[t] for d in values])
-        lons, lats = zip(*coords)
-        ok = OrdinaryKriging(lons, lats, v, variogram_model="linear", verbose=False)
-        z, _ = ok.execute("points", [target[1]], [target[0]])
-        estimates.append(z[0])
-    return np.pad(estimates, (0, len(times) - len(estimates)), constant_values=np.nan)
-
-def extract_relevant_points(ds, varname, lat, lon, radius_km, max_points):
+def extract_points(ds, varname, lat, lon, radius_km, max_points):
     coords, dists, values = [], [], []
     lats = ds.latitude.values
     lons = ds.longitude.values
 
-    # Approx bounding box (1 deg lat ≈ 111 km)
     lat_range = (lat - radius_km / 111, lat + radius_km / 111)
-    lon_range = (lon - radius_km / 80, lon + radius_km / 80)  # use ~80 km/deg at Icelandic latitudes
+    lon_range = (lon - radius_km / 80, lon + radius_km / 80)
 
-    for pt_lat in lats:
-        if pt_lat < lat_range[0] or pt_lat > lat_range[1]:
+    for la in lats:
+        if not lat_range[0] <= la <= lat_range[1]:
             continue
-        for pt_lon in lons:
-            if pt_lon < lon_range[0] or pt_lon > lon_range[1]:
+        for lo in lons:
+            if not lon_range[0] <= lo <= lon_range[1]:
                 continue
-            d = haversine((lat, lon), (float(pt_lat), float(pt_lon)))
+            d = haversine((lat, lon), (float(la), float(lo)))
             if d <= radius_km:
-                v = get_variable(ds, varname, float(pt_lat), float(pt_lon))
+                v = get_variable(ds, varname, float(la), float(lo))
                 if v is not None:
-                    coords.append((float(pt_lat), float(pt_lon)))
+                    coords.append((float(la), float(lo)))
                     dists.append(d)
                     values.append(v)
 
-    # Sort by distance and keep closest N
     if len(coords) > max_points:
         idx = np.argsort(dists)[:max_points]
         coords = [coords[i] for i in idx]
         values = [values[i] for i in idx]
-        print(f"    [Trim] Reduced to {len(coords)} closest points for kriging")
+        print(f"    [Trimmed] to {len(coords)} closest points")
 
     return coords, values
+
+def krige_all_timesteps(target, coords, values, times):
+    estimates = []
+    lons, lats = zip(*coords)
+    for t in range(len(times)):
+        try:
+            v = np.array([val[t] for val in values])
+            ok = OrdinaryKriging(lons, lats, v, variogram_model="linear", verbose=False)
+            z, _ = ok.execute("points", [target[1]], [target[0]])
+            estimates.append(z[0])
+        except Exception as e:
+            print(f"      [Skip timestep {t}] {e}")
+            estimates.append(np.nan)
+    return np.array(estimates)
 
 # ------------------ MAIN ------------------
 
 for var_key, var_info in variables.items():
-    print(f"\n[Kriging] Processing variable: {var_key}")
-    suffix = ".grib"
-    dates = years
+    print(f"\nProcessing variable: {var_key}")
+    suffix = ".nc" if var_key == "pr" else ".grib"
+    dates = months if var_key == "pr" else years
 
     for station_key, station in stations.items():
-        print(f"  [Station] {station_key}")
-        lat, lon, elev = station["lat"], station["lon"], station["elevation"]
+        print(f"  Station: {station_key}")
+        lat, lon = station["lat"], station["lon"]
 
         for date in dates:
             file_path = get_file_path(var_info, date, suffix)
-            print(f"    [File] Checking: {file_path}")
+            print(f"    File: {file_path}")
             if not os.path.isfile(file_path):
-                print(f"    [Skip] File not found.")
+                print("    [Skip] File not found.")
                 continue
 
             try:
-                print(f"    [Open] Loading dataset...")
                 ds = open_dataset(file_path, suffix)
-
-                # Fix longitude
-                if "longitude" in ds.coords:
-                    ds = ds.assign_coords(longitude=(((ds.longitude + 180) % 360) - 180))
-                    print(f"    [Fix] Longitude range adjusted to -180..180")
-
                 varname = var_info["var_name"]
                 time_vals = ds.time.values
 
-                print(f"    [Scan] Finding relevant grid points within {radius_km} km...")
-                coords, values = extract_relevant_points(ds, varname, lat, lon, radius_km, max_kriging_points)
-                print(f"    [Scan] Selected {len(coords)} points for kriging")
+                # Bounds check
+                if not (
+                    ds.longitude.min().item() <= lon <= ds.longitude.max().item() and
+                    ds.latitude.min().item() <= lat <= ds.latitude.max().item()
+                ):
+                    print("    [Skip] Station outside dataset bounds.")
+                    continue
+
+                coords, values = extract_points(ds, varname, lat, lon, radius_km, max_kriging_points)
+                print(f"    Found {len(coords)} valid points")
 
                 if len(values) > 3:
-                    print(f"    [Kriging] Interpolating for first timestep...")
-                    out_dir = f"{output_root}/{station_key}/{var_key}/kriging"
+                    print(f"    Interpolating {len(time_vals)} timesteps...")
+                    result = krige_all_timesteps((lat, lon), coords, values, time_vals)
+                    out_dir = os.path.join(output_root, station_key, var_key, "kriging")
                     make_output_dir(out_dir)
-                    result = apply_kriging((lat, lon), coords, values, time_vals)
-
-                    out_path = f"{out_dir}/{var_key}_{station_key}_{date}.nc"
-                    print(f"    [Save] Writing to {out_path}")
+                    out_path = os.path.join(out_dir, f"{var_key}_{station_key}_{date}.nc")
                     xr.Dataset({varname: ("time", result)}, coords={"time": time_vals}).to_netcdf(out_path)
-
-                    print(f"    [Done] {station_key} | {var_key} | {date}")
+                    print("    [Saved]")
                 else:
-                    print(f"    [Skip] Not enough points for kriging.")
+                    print("    [Skip] Not enough points for kriging.")
             except Exception as e:
                 print(f"    [Error] {e}")

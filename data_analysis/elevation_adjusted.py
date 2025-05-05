@@ -2,7 +2,6 @@ import os
 import numpy as np
 import pandas as pd
 import xarray as xr
-from haversine import haversine
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -10,11 +9,26 @@ warnings.filterwarnings("ignore")
 # ------------------ CONFIGURATION ------------------
 
 variables = {
-    "t2m": {
-        "input_dir": "V:/vedur/reikn/CARRA_ISL/T2M/t2m_3hr/one_year_per_gribfile",
-        "file_prefix": "CF_T2M_ISL",
-        "var_name": "t2m",
-        "elev_method": True
+    "wdir10": {
+        "input_dir": "V:/vedur/reikn/CARRA_ISL/D10m/d10m_3hr/one_year_per_gribfile",
+        "file_prefix": "CF_D10m",
+        "var_name": "wdir10",
+        "elev_method": False,
+        "is_monthly": False
+    },
+    "si10": {
+        "input_dir": "V:/vedur/reikn/CARRA_ISL/F10m/f10m_3hr/one_year_per_gribfile",
+        "file_prefix": "CF_F10m",
+        "var_name": "si10",
+        "elev_method": False,
+        "is_monthly": False
+    },
+    "pr": {
+        "input_dir": "V:/vedur/reikn/CARRA_ISL/PR/pr_3hr/Monthly_files",
+        "file_prefix": "CF_PR_",
+        "var_name": "pr",
+        "elev_method": False,
+        "is_monthly": True
     }
 }
 
@@ -25,6 +39,7 @@ stations = {
 
 output_root = "V:/ofanflod/verk/vakt/steph/python/jahnavi/output"
 years = list(range(2020, 2025))
+months = pd.date_range(start="2020-01", end="2025-01", freq="MS").strftime("%Y-%m").tolist()
 lapse_rate = -6.5 / 1000
 created_dirs = set()
 
@@ -61,8 +76,8 @@ def elevation_adjusted(values, station_elev, grid_elev):
 
 for var_key, var_info in variables.items():
     print(f"\n[Elevation] Processing variable: {var_key}")
-    suffix = ".grib"
-    dates = years
+    suffix = ".nc" if var_info["is_monthly"] else ".grib"
+    dates = months if var_info["is_monthly"] else years
 
     for station_key, station in stations.items():
         print(f"  [Station] {station_key}")
@@ -79,10 +94,18 @@ for var_key, var_info in variables.items():
                 print(f"    [Open] Loading dataset...")
                 ds = open_dataset(file_path, suffix)
 
-                # ---- FIX LONGITUDE RANGE HERE ----
                 if "longitude" in ds.coords:
                     ds = ds.assign_coords(longitude=(((ds.longitude + 180) % 360) - 180))
-                    print(f"    [Fix] Longitude range adjusted to -180..180")
+                    ds = ds.sortby("longitude")
+                    print(f"    [Fix] Longitude range adjusted and sorted (-180 to 180)")
+
+                    # Longitude bounds check
+                    lon_min = ds.longitude.min().item()
+                    lon_max = ds.longitude.max().item()
+                    if not (lon_min <= lon <= lon_max):
+                        print(f"    [Skip] Station longitude {lon} is out of dataset bounds ({lon_min} to {lon_max})")
+                        continue
+
 
                 varname = var_info["var_name"]
                 time_vals = ds.time.values
@@ -90,12 +113,21 @@ for var_key, var_info in variables.items():
                 print(f"    [Retrieve] Getting value at station location...")
                 v = get_variable(ds, varname, lat, lon)
 
-                print(f"    [Adjust] Applying elevation lapse rate...")
-                corrected = elevation_adjusted(v, elev, 100)
+                if v is None:
+                    print(f"    [Skip] Could not retrieve variable.")
+                    continue
 
-                out_dir = f"{output_root}/{station_key}/{var_key}/elevation_adjusted"
+                if var_info["elev_method"]:
+                    print(f"    [Adjust] Applying elevation lapse rate...")
+                    corrected = elevation_adjusted(v, elev, 100)
+                else:
+                    corrected = v
+
+                method_label = "elevation_adjusted" if var_info["elev_method"] else "raw"
+                out_dir = f"{output_root}/{station_key}/{var_key}/{method_label}"
                 make_output_dir(out_dir)
                 out_path = f"{out_dir}/{var_key}_{station_key}_{date}.nc"
+
                 print(f"    [Save] Writing to {out_path}")
                 xr.Dataset({varname: ("time", corrected)}, coords={"time": time_vals}).to_netcdf(out_path)
 
