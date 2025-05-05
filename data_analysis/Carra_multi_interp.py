@@ -99,6 +99,12 @@ def apply_gaussian(target, coords, values, times, varname, station_elev):
         return np.sum(result * weights, axis=0) / np.sum(weights, axis=0)
     return None
 
+def make_output_dir(out_dir):
+    if out_dir not in created_dirs:
+        os.makedirs(out_dir, exist_ok=True)
+        print(f"      Created folder: {out_dir}")
+        created_dirs.add(out_dir)
+
 # ------------------ MAIN ------------------
 
 methods = ["elevation_adjusted", "idw", "kriging", "gaussian"]
@@ -106,22 +112,31 @@ output_root = "V:/ofanflod/verk/vakt/steph/python/jahnavi/output"
 created_dirs = set()
 
 for var_key, var_info in variables.items():
+    print(f"\nProcessing variable: {var_key}")
     is_monthly = var_key == "pr"
     suffix = ".nc" if is_monthly else ".grib"
     dates = months if is_monthly else years
 
     for station_key, station in stations.items():
+        print(f"  Station: {station_key}")
         lat, lon, elev = station["lat"], station["lon"], station["elevation"]
 
         for date in dates:
             file_name = f"{var_info['file_prefix']}{date}{suffix}"
             file_path = os.path.join(var_info["input_dir"], file_name)
+            print(f"    Checking file: {file_name}")
 
             if not os.path.isfile(file_path):
+                print(f"    File not found, skipping: {file_name}")
                 continue
 
             try:
-                ds = xr.open_dataset(file_path, engine="cfgrib" if suffix == ".grib" else None, backend_kwargs={'indexpath': ''} if suffix == ".grib" else None)
+                print(f"    Opened file: {file_name}")
+                ds = xr.open_dataset(
+                    file_path,
+                    engine="cfgrib" if suffix == ".grib" else None,
+                    backend_kwargs={'indexpath': ''} if suffix == ".grib" else None
+                )
                 varname = var_info["var_name"]
                 time_vals = ds.time.values
                 grid_points = get_grid_points(ds)
@@ -138,46 +153,47 @@ for var_key, var_info in variables.items():
                 values = np.array(values)
 
                 if var_info["elev_method"]:
+                    print("      Running: Elevation Adjustment")
                     out_dir = f"{output_root}/{station_key}/{var_key}/elevation_adjusted"
-                    os.makedirs(out_dir, exist_ok=True)
-                    created_dirs.add(out_dir)
+                    make_output_dir(out_dir)
                     v = get_variable(ds, varname, lat, lon)
                     corrected = elevation_adjusted(v, elev, 100)
                     xr.Dataset({varname: ("time", corrected)}, coords={"time": time_vals})\
                         .to_netcdf(f"{out_dir}/{var_key}_{station_key}_{date}.nc")
 
                 if len(values) > 0:
+                    print("      Running: IDW")
                     out_dir = f"{output_root}/{station_key}/{var_key}/idw"
-                    os.makedirs(out_dir, exist_ok=True)
-                    created_dirs.add(out_dir)
+                    make_output_dir(out_dir)
                     result = apply_idw((lat, lon), coords, values, dists)
                     xr.Dataset({varname: ("time", result)}, coords={"time": time_vals})\
                         .to_netcdf(f"{out_dir}/{var_key}_{station_key}_{date}.nc")
 
                 if len(values) > 3:
+                    print("      Running: Kriging")
                     out_dir = f"{output_root}/{station_key}/{var_key}/kriging"
-                    os.makedirs(out_dir, exist_ok=True)
-                    created_dirs.add(out_dir)
+                    make_output_dir(out_dir)
                     result = apply_kriging((lat, lon), coords, values, time_vals)
                     xr.Dataset({varname: ("time", result)}, coords={"time": time_vals})\
                         .to_netcdf(f"{out_dir}/{var_key}_{station_key}_{date}.nc")
 
                 if len(values) > 0:
+                    print("      Running: Gaussian weighting")
                     out_dir = f"{output_root}/{station_key}/{var_key}/gaussian"
-                    os.makedirs(out_dir, exist_ok=True)
-                    created_dirs.add(out_dir)
+                    make_output_dir(out_dir)
                     result = apply_gaussian((lat, lon), coords, values, time_vals, varname, elev)
                     if result is not None:
                         xr.Dataset({varname: ("time", result)}, coords={"time": time_vals})\
                             .to_netcdf(f"{out_dir}/{var_key}_{station_key}_{date}.nc")
 
-                print(f"✅ {station_key} | {var_key} | {date}")
+                print(f"    Done: {station_key} | {var_key} | {date}")
 
             except Exception as e:
-                print(f"❌ Error {var_key} {station_key} {date}: {e}")
+                print(f"    Error {var_key} {station_key} {date}: {e}")
 
-# Report total output folders
+# Final summary
 num_dirs = len(created_dirs)
 expected_dirs = len(variables) * len(stations) * len(methods)
-print(f"\n✅ Created {num_dirs} output folders (expected max = {expected_dirs})")
-for d in sorted(created_dirs): print(" -", d)
+print(f"\nCreated {num_dirs} output folders (expected max = {expected_dirs})")
+for d in sorted(created_dirs):
+    print(" -", d)
