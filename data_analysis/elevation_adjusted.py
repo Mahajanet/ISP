@@ -7,8 +7,8 @@ input_dir = "/Users/jahnavimahajan/Projects/ISP/carra_data"
 output_dir = "/Users/jahnavimahajan/Projects/ISP/raw_data/elevation_adjusted"
 
 station_meta = {
-    "isa": {"lat": 66.0596, "lon": -23.1699},
-    "thver": {"lat": 66.0444, "lon": -23.3074}
+    "isa": {"lat": 66.0596, "lon": -23.1699, "elev": 2.2},
+    "thver": {"lat": 66.0444, "lon": -23.3074, "elev": 741.0}
 }
 
 variables = {
@@ -19,18 +19,38 @@ variables = {
 }
 
 def get_nearest(ds, target_lat, target_lon):
-    if 'latitude' not in ds.coords or 'longitude' not in ds.coords:
-        raise ValueError("Missing 'latitude' or 'longitude' in dataset coords.")
-
     lats = ds['latitude']
     lons = ds['longitude']
-
-    if lats.ndim != 1 or lons.ndim != 1:
-        raise ValueError("Expected 1D latitude and longitude coordinates.")
-
     lat_idx = np.abs(lats - target_lat).argmin().item()
     lon_idx = np.abs(lons - target_lon).argmin().item()
     return lats[lat_idx].item(), lons[lon_idx].item(), lat_idx, lon_idx
+
+def apply_elevation_correction(data, ds, lat_idx, lon_idx, station_elev, var):
+    if 'height' not in ds.coords:
+        return data  # no elevation data, skip correction
+
+    # Assume grid elevation is constant across time
+    try:
+        grid_elev = float(ds['height'].values)
+    except Exception:
+        return data
+
+    delta_h = station_elev - grid_elev  # in meters
+
+    if var == 't2m':
+        lapse_rate = -0.0065  # °C per meter
+        correction = delta_h * lapse_rate
+        return data + correction
+
+    elif var == 'pr':
+        scale = 1 + (delta_h / 1000) * 0.05  # ~5% per 1000m
+        return data * scale
+
+    elif var == 'si10':
+        scale = 1 + (delta_h / 1000) * 0.05  # ~5% per 1000m
+        return data * scale
+
+    return data
 
 def process_file(file_path, var, var_info):
     filename = os.path.basename(file_path)
@@ -48,7 +68,6 @@ def process_file(file_path, var, var_info):
             print(f"      Renaming coordinates: {rename_coords}")
             ds = ds.rename(rename_coords)
 
-        # Fix longitudes
         if (ds.longitude > 180).any():
             print("      Adjusting longitudes from 0–360 to -180–180")
             ds['longitude'] = (((ds['longitude'] + 180) % 360) - 180).sortby(ds['longitude'])
@@ -71,6 +90,10 @@ def process_file(file_path, var, var_info):
 
                 data = ds[var_to_use].isel(latitude=lat_idx, longitude=lon_idx)
 
+                if var in ['t2m', 'pr', 'si10']:
+                    print("      Applying elevation adjustment...")
+                    data = apply_elevation_correction(data, ds, lat_idx, lon_idx, meta["elev"], var)
+
                 out_dir = os.path.join(output_dir, station, var)
                 os.makedirs(out_dir, exist_ok=True)
                 out_file = os.path.join(out_dir, f"{var}_{station}_{year}.nc")
@@ -84,7 +107,6 @@ def process_file(file_path, var, var_info):
 
 def main():
     print(f"Scanning input directory: {input_dir}\n")
-
     all_errors = []
 
     for var, info in variables.items():
