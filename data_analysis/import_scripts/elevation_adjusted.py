@@ -1,133 +1,178 @@
+#!/usr/bin/env python3
 import os
 import re
+import logging
+
 import numpy as np
 import xarray as xr
+from haversine import haversine
 
-input_dir = "/Users/jahnavimahajan/Projects/ISP/carra_data"
-output_dir = "/Users/jahnavimahajan/Projects/ISP/raw_data/elevation_adjusted"
 
-station_meta = {
-    "isa": {"lat": 66.0596, "lon": -23.1699, "elev": 2.2},
-    "thver": {"lat": 66.0444, "lon": -23.3074, "elev": 741.0}
+# ─── CONFIGURATION ─────────────────────────────────────────────────────────────
+
+INPUT_DIR = "/Users/jahnavimahajan/Projects/ISP/carra_data"
+OUTPUT_DIR = "/Users/jahnavimahajan/Projects/ISP/raw_data/elevation_adjusted"
+
+# station definitions
+STATIONS = {
+    "isa":  {"lat": 66.0596, "lon": -23.1699, "elev": 2.2},
+    "thver":{"lat": 66.0444, "lon": -23.3074, "elev": 741.0},
 }
 
-variables = {
-    "wdir10": {"pattern": r"D10m.*\.nc", "fallback": "D10"},
-    "si10": {"pattern": r"F10m.*\.nc", "fallback": "10si"},
-    "pr": {"pattern": r"pr_daily_.*\.nc", "fallback": "pr"},
-    "t2m": {"pattern": r"t2m_day_ISL.*\.nc", "fallback": "t2m"},
+# which files match which variable, and fallback name if needed
+VARIABLES = {
+    "wdir10": {"pattern": r"D10m.*\.nc$", "fallback": "D10"},
+    "si10":   {"pattern": r"F10m.*\.nc$", "fallback": "10si"},
+    "pr":     {"pattern": r"pr_daily_.*\.nc$", "fallback": "pr"},
+    "t2m":    {"pattern": r"t2m_day_ISL.*\.nc$", "fallback": "t2m"},
 }
 
-def get_nearest(ds, target_lat, target_lon):
-    lats = ds['latitude']
-    lons = ds['longitude']
-    lat_idx = np.abs(lats - target_lat).argmin().item()
-    lon_idx = np.abs(lons - target_lon).argmin().item()
-    return lats[lat_idx].item(), lons[lon_idx].item(), lat_idx, lon_idx
 
-def apply_elevation_correction(data, ds, lat_idx, lon_idx, station_elev, var):
-    if 'height' not in ds.coords:
-        return data  # no elevation data, skip correction
+# ─── PICK BEST CELL ────────────────────────────────────────────────────────────
 
-    # Assume grid elevation is constant across time
-    try:
-        grid_elev = float(ds['height'].values)
-    except Exception:
-        return data
+def pick_best_cell(
+    ds,
+    station_lat,
+    station_lon,
+    station_elev,
+    max_radius_km: float = 50,
+    max_elev_diff_m: float = 500,
+    alpha: float = 0.7
+):
+    """
+    Find the (lat_idx, lon_idx) minimizing:
+       alpha * (horiz_dist / max_radius_km)
+     + (1-alpha) * (|grid_elev - station_elev| / max_elev_diff_m)
+    among cells within max_radius_km horizontally.
+    """
+    # 1D coordinate arrays
+    lats = ds["latitude"].values  # shape (nlat,)
+    lons = ds["longitude"].values # shape (nlon,)
+    # make 2D grids
+    lat2d, lon2d = np.meshgrid(lats, lons, indexing="ij")
+    # flatten for haversine calls
+    pts = np.column_stack((lat2d.ravel(), lon2d.ravel()))
+    # horizontal distance (km)
+    d_h = np.array([
+        haversine((station_lat, station_lon), (lat, lon))
+        for lat, lon in pts
+    ]).reshape(lat2d.shape)
+    # mask cells beyond search radius
+    mask_far = d_h > max_radius_km
 
-    delta_h = station_elev - grid_elev  # in meters
+    # get grid elevation if available (else assume zero)
+    if "height" in ds.coords:
+        try:
+            grid_elev = float(ds["height"].values)
+        except Exception:
+            grid_elev = station_elev
+    else:
+        grid_elev = station_elev
 
-    if var == 't2m':
-        lapse_rate = -0.0065  # °C per meter
-        correction = delta_h * lapse_rate
-        return data + correction
+    # vertical difference field (m)
+    d_v = np.abs(grid_elev - station_elev) * np.ones_like(d_h)
 
-    elif var == 'pr':
-        scale = 1 + (delta_h / 1000) * 0.05  # ~5% per 1000m
-        return data * scale
+    # normalized components
+    dh_norm = d_h / max_radius_km
+    dv_norm = d_v / max_elev_diff_m
 
-    elif var == 'si10':
-        scale = 1 + (delta_h / 1000) * 0.05  # ~5% per 1000m
-        return data * scale
+    # combined score
+    score = alpha * dh_norm + (1 - alpha) * dv_norm
+    score[mask_far] = np.inf
 
-    return data
+    # pick argmin
+    idx_flat = np.argmin(score)
+    return np.unravel_index(idx_flat, score.shape)
 
-def process_file(file_path, var, var_info):
+
+# ─── PROCESS SINGLE FILE ───────────────────────────────────────────────────────
+
+def process_file(file_path: str, var_key: str, var_info: dict):
     filename = os.path.basename(file_path)
-    year_match = re.findall(r"\d{4}", filename)
-    year = year_match[0] if year_match else "unknown"
+    # extract first 4-digit year for naming
+    m = re.search(r"\d{4}", filename)
+    year = m.group(0) if m else "unknown"
 
-    try:
-        ds = xr.open_dataset(file_path)
+    logging.info(f"Opening {filename}")
+    ds = xr.open_dataset(file_path)
 
-        # Rename coordinates if necessary
-        rename_coords = {}
-        if 'lat' in ds.coords: rename_coords['lat'] = 'latitude'
-        if 'lon' in ds.coords: rename_coords['lon'] = 'longitude'
-        if rename_coords:
-            print(f"      Renaming coordinates: {rename_coords}")
-            ds = ds.rename(rename_coords)
+    # rename coords if needed
+    rename_map = {}
+    if "lat" in ds.coords:
+        rename_map["lat"] = "latitude"
+    if "lon" in ds.coords:
+        rename_map["lon"] = "longitude"
+    if rename_map:
+        ds = ds.rename(rename_map)
+        logging.info(f"  renamed coords {rename_map}")
 
-        if (ds.longitude > 180).any():
-            print("      Adjusting longitudes from 0–360 to -180–180")
-            ds['longitude'] = (((ds['longitude'] + 180) % 360) - 180).sortby(ds['longitude'])
+    # wrap longitudes to -180..180
+    if (ds["longitude"] > 180).any():
+        ds = ds.assign_coords(
+            longitude=(((ds.longitude + 180) % 360) - 180)
+        ).sortby("longitude")
+        logging.info("  adjusted longitudes to -180..180")
 
-        # Confirm variable to use
-        if var not in ds.data_vars:
-            if var_info["fallback"] in ds.data_vars:
-                print(f"      Using fallback variable '{var_info['fallback']}' instead of expected '{var}'")
-                var_to_use = var_info["fallback"]
-            else:
-                raise ValueError(f"Variable '{var}' and fallback '{var_info['fallback']}' not found. Available: {list(ds.data_vars)}")
+    # choose which variable to read
+    if var_key in ds.data_vars:
+        var_to_use = var_key
+    else:
+        fb = var_info["fallback"]
+        if fb in ds.data_vars:
+            var_to_use = fb
+            logging.info(f"  using fallback variable '{fb}'")
         else:
-            var_to_use = var
+            logging.error(
+                f"  neither '{var_key}' nor fallback '{fb}' found in {filename}, skipping"
+            )
+            return
 
-        for station, meta in station_meta.items():
-            print(f"    Station: {station} @ ({meta['lat']}, {meta['lon']})")
-            try:
-                lat_val, lon_val, lat_idx, lon_idx = get_nearest(ds, meta["lat"], meta["lon"])
-                print(f"      Nearest point coords: lat={lat_val}, lon={lon_val}")
+    for station, meta in STATIONS.items():
+        lat0, lon0, elev0 = meta["lat"], meta["lon"], meta["elev"]
+        logging.info(f"  Station {station}: ({lat0:.4f}, {lon0:.4f}), elev={elev0}m")
 
-                data = ds[var_to_use].isel(latitude=lat_idx, longitude=lon_idx)
+        # pick best cell
+        lat_idx, lon_idx = pick_best_cell(ds, lat0, lon0, elev0)
+        chosen_lat = float(ds["latitude"].values[lat_idx])
+        chosen_lon = float(ds["longitude"].values[lon_idx])
+        logging.info(f"    selected grid cell lat={chosen_lat:.4f}, lon={chosen_lon:.4f}")
 
-                if var in ['t2m', 'pr', 'si10']:
-                    print("      Applying elevation adjustment...")
-                    data = apply_elevation_correction(data, ds, lat_idx, lon_idx, meta["elev"], var)
+        # extract timeseries
+        data = ds[var_to_use].isel(latitude=lat_idx, longitude=lon_idx)
 
-                out_dir = os.path.join(output_dir, station, var)
-                os.makedirs(out_dir, exist_ok=True)
-                out_file = os.path.join(out_dir, f"{var}_{station}_{year}.nc")
+        # write out
+        out_dir = os.path.join(OUTPUT_DIR, station, var_key)
+        os.makedirs(out_dir, exist_ok=True)
+        out_file = os.path.join(out_dir, f"{var_key}_{station}_{year}.nc")
+        data.to_netcdf(out_file)
+        logging.info(f"    wrote {out_file}")
 
-                data.to_netcdf(out_file)
-                print(f"      Saved: {out_file}")
-            except Exception as e:
-                print(f"      ERROR processing {filename}: \"{e}\"")
-    except Exception as e:
-        print(f"    ERROR opening {filename}: \"{e}\"")
+
+# ─── MAIN DRIVER ───────────────────────────────────────────────────────────────
 
 def main():
-    print(f"Scanning input directory: {input_dir}\n")
-    all_errors = []
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s"
+    )
+    logging.info("Starting elevation-aware extraction")
 
-    for var, info in variables.items():
-        print(f"Processing variable: {var}")
-        pattern = re.compile(info["pattern"])
-        files = [os.path.join(input_dir, f) for f in os.listdir(input_dir) if pattern.match(f)]
-        print(f"    Found {len(files)} files matching '{info['pattern']}'\n")
-
-        for file_path in sorted(files):
-            print(f"  File: {os.path.basename(file_path)}")
+    for var_key, var_info in VARIABLES.items():
+        pat = re.compile(var_info["pattern"])
+        candidates = sorted(
+            f for f in os.listdir(INPUT_DIR)
+            if pat.match(f)
+        )
+        logging.info(f"Found {len(candidates)} files for '{var_key}'")
+        for fname in candidates:
+            path = os.path.join(INPUT_DIR, fname)
             try:
-                process_file(file_path, var, info)
-            except Exception as e:
-                all_errors.append((file_path, str(e)))
-                print(f"    General error: {e}")
-            print()
+                process_file(path, var_key, var_info)
+            except Exception:
+                logging.exception(f"Error in processing {fname}")
 
-    if all_errors:
-        print("Processing completed with some warnings or errors.")
-    else:
-        print("✅ Processing complete.")
+    logging.info("All done.")
+
 
 if __name__ == "__main__":
     main()
