@@ -1,181 +1,102 @@
 import os
 import numpy as np
-import pandas as pd
 import xarray as xr
-from haversine import haversine
-import warnings
+from pathlib import Path
 
-warnings.filterwarnings("ignore")
-
-# ------------------ CONFIGURATION ------------------
-
-variables = {
-    "t2m": {
-        "input_dir": "V:/vedur/reikn/CARRA_ISL/T2M/t2m_3hr/one_year_per_gribfile",
-        "file_prefix": "CF_T2M_ISL",
-        "var_name": "t2m",
-        "elev_method": True
-    },
-    "wdir10": {
-        "input_dir": "V:/vedur/reikn/CARRA_ISL/D10m/d10m_3hr/one_year_per_gribfile",
-        "file_prefix": "CF_D10m",
-        "var_name": "wdir10",
-        "elev_method": False
-    },
-    "si10": {
-        "input_dir": "V:/vedur/reikn/CARRA_ISL/F10m/f10m_3hr/one_year_per_gribfile",
-        "file_prefix": "CF_F10m",
-        "var_name": "si10",
-        "elev_method": False
-    },
-    "pr": {
-        "input_dir": "V:/vedur/reikn/CARRA_ISL/PR/pr_3hr/Monthly_files",
-        "file_prefix": "CF_PR_",
-        "var_name": "pr",
-        "elev_method": False
-    }
-}
-
+# === CONFIGURATION ===
+data_folder = "/Users/jahnavimahajan/Projects/ISP/carra_data"
+output_base = Path("/Users/jahnavimahajan/Projects/ISP/raw_data/gaussian")
 stations = {
     "isa": {"lat": 66.0596, "lon": -23.1699, "elevation": 2.2},
     "thver": {"lat": 66.0444, "lon": -23.3074, "elevation": 741.0}
 }
 
-output_root = "V:/ofanflod/verk/vakt/steph/python/jahnavi/output"
-radius_km = 50
-alpha = 3.0
-Rp = 1000.0
-gradT = -0.5 / 100
-years = list(range(2020, 2025))
-months = pd.date_range(start="2020-01", end="2025-01", freq="MS").strftime("%Y-%m").tolist()
-created_dirs = set()
+# Mapping real variable names in files to the standard names we want to output
+variable_name_map = {
+    "t2m": "t2m",
+    "pr": "pr",
+    "si10": "si10", "10si": "si10",
+    "wdir10": "wdir10", "D10": "wdir10"
+}
 
-# ------------------ HELPERS ------------------
+# Search order for variables in the files
+search_priority = ["t2m", "pr", "si10", "wdir10"]
 
-def get_file_path(var_info, date, suffix):
-    return os.path.join(var_info["input_dir"], f"{var_info['file_prefix']}{date}{suffix}")
-
-def make_output_dir(out_dir):
-    if out_dir not in created_dirs:
-        os.makedirs(out_dir, exist_ok=True)
-        print(f"      Created folder: {out_dir}")
-        created_dirs.add(out_dir)
-
-def open_dataset(file_path, suffix):
-    ds = xr.open_dataset(
-        file_path,
-        engine="cfgrib" if suffix == ".grib" else None,
-        backend_kwargs={'indexpath': ''} if suffix == ".grib" else None
-    )
-
-    # ✅ Fix longitudes: convert 0–360 to -180–180, then sort
-    if "longitude" in ds.coords:
-        ds = ds.assign_coords(longitude=(((ds.longitude + 180) % 360) - 180))
-        ds = ds.sortby("longitude")
-        print(f"    [Fix] Longitude range adjusted and sorted (-180 to 180)")
-
+# === HELPER FUNCTIONS ===
+def shift_and_fix_coords(ds):
+    """Rename and adjust coordinates if necessary."""
+    if "latitude" in ds.coords and "longitude" in ds.coords:
+        ds = ds.rename({"latitude": "lat", "longitude": "lon"})
+    if "lon" in ds.coords:
+        ds["lon"] = (((ds["lon"] + 180) % 360) - 180)  # Normalize longitude to [-180, 180]
+        ds = ds.sortby("lon")  # Sort by longitude to handle wrapping correctly
     return ds
 
-def get_variable(ds, varname, lat, lon, timestep=None):
+def extract_variable(ds):
+    """Extract the appropriate variable from the dataset."""
+    for real_var, std_var in variable_name_map.items():
+        if real_var in ds.data_vars:
+            return real_var, std_var
+    return None, None
+
+def apply_gaussian_weights(grid_lats, grid_lons, station_lat, station_lon, sigma=0.1):
+    """Apply Gaussian weights to the grid based on distances to the station."""
+    dlat = np.radians(grid_lats - station_lat)
+    dlon = np.radians(grid_lons - station_lon)
+    a = np.sin(dlat / 2) ** 2 + np.cos(np.radians(station_lat)) * np.cos(np.radians(grid_lats)) * np.sin(dlon / 2) ** 2
+    distances = 2 * np.arcsin(np.sqrt(a))
+    weights = np.exp(-(distances ** 2) / (2 * sigma ** 2))
+    return weights / np.sum(weights)  # Normalize weights
+
+def interpolate_with_gaussian(data_array, weights):
+    """Interpolate the data using Gaussian weights."""
+    flat = data_array.reshape(data_array.shape[0], -1)  # Flatten spatial dimensions
+    flat_weights = weights.ravel()  # Flatten weights
+    weighted = np.sum(flat * flat_weights, axis=1)  # Apply weights and sum
+    return weighted
+
+# === MAIN SCRIPT ===
+for filename in os.listdir(data_folder):
+    if not filename.endswith(".nc"):
+        continue
+
+    filepath = os.path.join(data_folder, filename)
+    print(f"Opening file: {filename}")
+
     try:
-        sel = ds.sel(latitude=lat, longitude=lon, method="nearest")
-        return sel[varname].isel(time=timestep).values if timestep is not None else sel[varname].values
-    except:
-        return None
+        ds = xr.open_dataset(filepath)
+        ds = shift_and_fix_coords(ds)
+    except Exception as e:
+        print(f"Failed to open {filename}: {e}")
+        continue
 
-def apply_gaussian(target, coords, values, times, varname, station_elev):
-    result = []
-    weights = []
-    skipped = 0
+    real_var, std_var = extract_variable(ds)
+    if not real_var:
+        print(f"Skipping {filename}: no valid variable found.")
+        continue
 
-    for i, (lat, lon) in enumerate(coords):
-        dist_m = haversine((target[0], target[1]), (lat, lon)) * 1000
-        weight = max(np.exp(-alpha * (dist_m / Rp)**2) - np.exp(-alpha), 0.0)
-        if weight <= 1e-8:
-            skipped += 1
-            continue
-        v = values[i]
-        if varname == "t2m":
-            v = v + gradT * (station_elev - 100)
-        result.append(v)
-        weights.append(weight)
+    data = ds[real_var]
+    if "height" in data.dims:
+        data = data.squeeze(dim="height", drop=True)  # Drop height dimension if present
 
-    if result:
-        result = np.array(result)
-        weights = np.array(weights)[:, np.newaxis]
-        combined = np.sum(result * weights, axis=0) / np.sum(weights, axis=0)
-        print(f"      Gaussian combined from {len(result)} points (skipped {skipped})")
-        return combined
-    print(f"      No valid points after weighting")
-    return None
+    if not set(data.dims).issuperset({"time", "lat", "lon"}):
+        print(f"Skipping {filename}: unsupported shape {data.shape}")
+        continue
 
-def extract_gaussian_points(ds, varname, lat, lon):
-    coords = []
-    values = []
-    lats = ds.latitude.values
-    lons = ds.longitude.values
+    print(f"Using variable: {std_var}")
+    lats = ds["lat"].values
+    lons = ds["lon"].values
+    lon_grid, lat_grid = np.meshgrid(lons, lats)
 
-    lat_range = (lat - radius_km / 111, lat + radius_km / 111)
-    lon_range = (lon - radius_km / 80, lon + radius_km / 80)
+    for station_name, station_info in stations.items():
+        print(f"Interpolating for station: {station_name}")
+        weights = apply_gaussian_weights(lat_grid, lon_grid, station_info["lat"], station_info["lon"])
+        result = interpolate_with_gaussian(data.values, weights)
 
-    for pt_lat in lats:
-        if pt_lat < lat_range[0] or pt_lat > lat_range[1]:
-            continue
-        for pt_lon in lons:
-            if pt_lon < lon_range[0] or pt_lon > lon_range[1]:
-                continue
-            d = haversine((lat, lon), (float(pt_lat), float(pt_lon)))
-            if d <= radius_km:
-                v = get_variable(ds, varname, float(pt_lat), float(pt_lon))
-                if v is not None:
-                    coords.append((float(pt_lat), float(pt_lon)))
-                    values.append(v)
-    return coords, values
+        # Ensure the directory exists
+        out_dir = output_base / station_name / std_var
+        out_dir.mkdir(parents=True, exist_ok=True)
 
-# ------------------ MAIN ------------------
-
-for var_key, var_info in variables.items():
-    print(f"\n[Gaussian] Processing variable: {var_key}")
-    is_monthly = var_key == "pr"
-    suffix = ".nc" if is_monthly else ".grib"
-    dates = months if is_monthly else years
-
-    for station_key, station in stations.items():
-        print(f"  [Station] {station_key}")
-        lat, lon, elev = station["lat"], station["lon"], station["elevation"]
-
-        for date in dates:
-            file_path = get_file_path(var_info, date, suffix)
-            print(f"    [File] Checking: {file_path}")
-            if not os.path.isfile(file_path):
-                print(f"    [Skip] File not found.")
-                continue
-
-            try:
-                print(f"    [Open] Loading dataset...")
-                ds = open_dataset(file_path, suffix)
-
-                varname = var_info["var_name"]
-                time_vals = ds.time.values
-
-                print(f"    [Scan] Gathering candidate points...")
-                coords, values = extract_gaussian_points(ds, varname, lat, lon)
-                print(f"    [Scan] Found {len(coords)} candidate points")
-
-                if values:
-                    print(f"    [Gaussian] Applying weights and combining...")
-                    out_dir = f"{output_root}/{station_key}/{var_key}/gaussian"
-                    make_output_dir(out_dir)
-                    result = apply_gaussian((lat, lon), coords, values, time_vals, varname, elev)
-
-                    if result is not None:
-                        out_path = f"{out_dir}/{var_key}_{station_key}_{date}.nc"
-                        print(f"    [Save] Writing to {out_path}")
-                        xr.Dataset({varname: ("time", result)}, coords={"time": time_vals}).to_netcdf(out_path)
-                        print(f"    [Done] {station_key} | {var_key} | {date}")
-                    else:
-                        print(f"    [Skip] No result generated")
-                else:
-                    print(f"    [Skip] No valid points for Gaussian")
-            except Exception as e:
-                print(f"    [Error] {e}")
+        out_path = out_dir / f"{station_name}_{std_var}_{filename}"
+        xr.Dataset({std_var: (["time"], result)}, coords={"time": ds["time"]}).to_netcdf(out_path)
+        print(f"Saved to: {out_path}")
