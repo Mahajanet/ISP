@@ -18,7 +18,7 @@ VARIABLE_NAME_MAP = {
     "t2m":    "t2m", "T2m": "t2m",
     "pr":     "pr",
     "si10":   "si10", "10si": "si10",
-    "wdir10": "wdir10", "D10":  "wdir10",
+    "wdir10": "wdir10","D10":  "wdir10",
 }
 EARTH_R        = 6_371_000.0  # Earth radius [m]
 Rp             = 50_000.0     # Gaussian radius [m]
@@ -86,78 +86,94 @@ def mask_nan(arrays):
     Given a list of 1-D NumPy arrays, drop any time-steps where ANY array is NaN.
     Returns (masked_arrays, boolean_mask).
     """
-    if not arrays or arrays[0].size==0:
-        return [], np.array([],dtype=bool)
+    if not arrays or arrays[0].size == 0:
+        return [], np.array([], dtype=bool)
     mask = np.ones(arrays[0].shape, dtype=bool)
     for a in arrays:
         mask &= ~np.isnan(a)
     return [a[mask] for a in arrays], mask
 
+#-------------------------------------------------------------------------------
+
 def cara_interp(lat0, lon0, elev0, ds, real_var, std_var):
     """
-    3×3 Gaussian‐weighted interpolation + lapse‐rate (for t2m), with t2m fallback.
+    3×3 Gaussian‐weighted interpolation + dynamic lapse‐rate for t2m.
     Returns a pandas.Series (daily‐resampled).
     """
-    # --- squeeze out any singleton vertical dims on the variable
+    # 1) Prepare the data array, squeeze vertical dims
     da = ds[real_var]
     for d in ("height","level","heightAboveGround"):
         if d in da.dims:
-            da = da.squeeze({d:1},drop=True)
+            da = da.squeeze({d:1}, drop=True)
 
-    # extract orography if present, also squeezed
+    # 2) Extract orography if available
     orog_arr = None
     if "orog" in ds:
         og = ds["orog"]
         for d in ("height","level"):
             if d in og.dims:
-                og = og.squeeze({d:1},drop=True)
+                og = og.squeeze({d:1}, drop=True)
         orog_arr = og.values
 
-    arr   = da.values.astype(float)              # shape (time,lat,lon)
-    times = pd.to_datetime(da["time"].values)    # length T
+    arr   = da.values.astype(float)                # (time, lat, lon)
+    times = pd.to_datetime(da["time"].values)      # length T
 
-    neigh = []; wts = []
+    # 3) Gather 3×3 neighbors: values, elevation diffs & horizontal distances
+    neigh_vals = []
+    dz         = []
+    dists      = []
     for di in (-1,0,1):
       for dj in (-1,0,1):
-        i,j,cell_elev,_,_,dist = find_row_col_neighbor(lat0,lon0,da,orog_arr,di,dj)
-        vals = da.isel(lat=i,lon=j).values.astype(float)  # now 1-D (time,)
-        if std_var=="t2m":
-            vals = vals + LAPSE*(elev0 - cell_elev)
-        neigh.append(vals)
-        wts.append(math.exp(-0.5*(dist/Rp)**2))
+        i, j, cell_elev, _, _, dist = find_row_col_neighbor(
+            lat0, lon0, da, orog_arr, di, dj
+        )
+        vals = da.isel(lat=i, lon=j).values.astype(float)  # shape (time,)
+        neigh_vals.append(vals)
+        dz.append(cell_elev - elev0)
+        dists.append(dist)
 
-    # mask out any all-NaN time-steps
-    neigh_masked, mask = mask_nan(neigh)
+    neigh_vals = np.vstack(neigh_vals)  # shape (9, T)
+    dz         = np.array(dz)           # shape (9,)
+    dists      = np.array(dists)        # shape (9,)
 
-    # for t2m, if 3×3 all NaN, fallback to single‐cell
-    if std_var=="t2m" and (not neigh_masked or mask.sum()==0):
-        print(f"{LOG}    • all-NaN in 3×3 for t2m, using single-cell fallback")
-        i0,j0,_ = find_row_col(lat0,lon0,da,orog_arr)
-        single = da.isel(lat=i0,lon=j0).values.astype(float)
-        single = single + LAPSE*(elev0 - (orog_arr[i0,j0] if orog_arr is not None else 0))
-        mask = ~np.isnan(single)
-        neigh_masked = [ single[mask] ]
-        wts = [1.0]
+    # 4) Compute time‐varying lapse‐rate by fitting temp vs. dz at each t
+    T = neigh_vals.shape[1]
+    slopes = np.full(T, LAPSE, dtype=float)
 
-    if not neigh_masked:
-        return pd.Series([],dtype=float)
+    for t in range(T):
+        y = neigh_vals[:, t]
+        ok = ~np.isnan(y) & ~np.isnan(dz)
+        if ok.sum() >= 2:
+            try:
+                slopes[t], _ = np.polyfit(dz[ok], y[ok], 1)
+            except np.linalg.LinAlgError:
+                slopes[t] = LAPSE
+        else:
+            slopes[t] = LAPSE
 
-    w = np.array(wts); w /= w.sum()
-    stacked = np.vstack(neigh_masked).T   # shape (valid_times,9 or 1)
-    out    = stacked.dot(w)              # weighted sum
+    # 5) Apply that slope correction to each neighbor series
+    #    corrected[k, t] = y_k(t) - slope(t) * dz[k]
+    corrected = neigh_vals - slopes[None, :] * dz[:, None]
 
-    # re-apply times[mask] and daily resample
-    t2 = times[mask]
-    s  = pd.Series(out, index=t2)
-    if std_var=="pr":
+    # 6) Compute horizontal Gaussian weights from dists
+    wts = np.exp(-0.5 * (dists / Rp)**2)
+    wts /= wts.sum()
+
+    # 7) Weighted sum across neighbors → time series
+    ts = corrected.T.dot(wts)  # shape (T,)
+
+    # 8) Wrap in pandas.Series + daily resample
+    s = pd.Series(ts, index=times)
+    if std_var == "pr":
         s = s.resample(RESAMPLE_RULE).sum()
     else:
         s = s.resample(RESAMPLE_RULE).mean()
+
     return s
 
 #-------------------------------------------------------------------------------
 
-if __name__=="__main__":
+if __name__ == "__main__":
     print(f"{LOG} start")
 
     for fname in sorted(os.listdir(DATA_FOLDER)):
@@ -174,11 +190,11 @@ if __name__=="__main__":
         ds = shift_and_fix_coords(ds)
         real_var, std_var = extract_variable(ds, fname)
 
-        # dims check
+        # dims check + squeeze any leftover vertical dims
         da = ds[real_var]
         for d in ("height","level"):
             if d in da.dims:
-                da = da.squeeze({d:1},drop=True)
+                da = da.squeeze({d:1}, drop=True)
         if not set(da.dims).issuperset({"time","lat","lon"}):
             print(f"{LOG}  • skipping `{fname}`: dims {da.dims}")
             ds.close()
@@ -186,14 +202,18 @@ if __name__=="__main__":
 
         for station_name, info in STATIONS.items():
             print(f"{LOG}  → Station `{station_name}`")
-            series = cara_interp(info["lat"], info["lon"], info["elev"],
-                                 ds, real_var, std_var)
+            series = cara_interp(
+                info["lat"], info["lon"], info["elev"],
+                ds, real_var, std_var
+            )
 
-            out_ds  = xr.Dataset({std_var:(["time"],series.values)},
-                                 coords={"time":series.index.values})
-            out_dir = OUTPUT_ROOT/station_name/std_var
+            out_ds  = xr.Dataset(
+                {std_var: (["time"], series.values)},
+                coords={"time": series.index.values}
+            )
+            out_dir = OUTPUT_ROOT / station_name / std_var
             out_dir.mkdir(parents=True, exist_ok=True)
-            out_path = out_dir/f"{station_name}_{std_var}_{fname}"
+            out_path = out_dir / f"{station_name}_{std_var}_{fname}"
             try:
                 out_ds.to_netcdf(out_path)
                 print(f"{LOG}    ✔ saved → {out_path}")
