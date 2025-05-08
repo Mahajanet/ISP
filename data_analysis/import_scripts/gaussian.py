@@ -18,11 +18,11 @@ VARIABLE_NAME_MAP = {
     "t2m":    "t2m", "T2m": "t2m",
     "pr":     "pr",
     "si10":   "si10", "10si": "si10",
-    "wdir10": "wdir10","D10":  "wdir10",
+    "wdir10": "wdir10", "D10":  "wdir10",
 }
 EARTH_R        = 6_371_000.0  # Earth radius [m]
 Rp             = 50_000.0     # Gaussian radius [m]
-LAPSE          = -0.0065      # °C per m (for t2m only)
+LAPSE          = -0.0065      # default lapse‐rate (°C per m)
 RESAMPLE_RULE  = "D"          # daily resampling rule
 LOG            = "[CARA-GAUSS]"
 
@@ -49,10 +49,7 @@ def extract_variable(ds, fname):
     return fb, fb
 
 def find_row_col(lat0, lon0, da, orog_arr):
-    """
-    Nearest grid‐cell indices for (lat0,lon0) in da,
-    plus its elevation from orog_arr (or NaN).
-    """
+    """Nearest grid‐cell indices for (lat0,lon0) in da + its elevation."""
     lats = da["lat"].values
     lons = da["lon"].values
     i    = int(np.argmin(np.abs(lats - lat0)))
@@ -62,15 +59,14 @@ def find_row_col(lat0, lon0, da, orog_arr):
 
 def find_row_col_neighbor(lat0, lon0, da, orog_arr, di, dj):
     """
-    Offset by di,dj in grid indices from the nearest cell to lat0,lon0.
-    Returns i,j,elev_cell,cell_lat,cell_lon,dist_m.
+    Offset by di,dj from the nearest cell to lat0,lon0.
+    Returns i,j,cell_elev,cell_lat,cell_lon,dist_m.
     """
     i0, j0, _ = find_row_col(lat0, lon0, da, orog_arr)
     i  = max(0, min(i0+di, da["lat"].size-1))
     j  = max(0, min(j0+dj, da["lon"].size-1))
     latn = float(da["lat"].values[i])
     lonn = float(da["lon"].values[j])
-    # haversine
     dlat = math.radians(latn - lat0)
     dlon = math.radians(lonn - lon0)
     a    = (math.sin(dlat/2)**2 +
@@ -81,26 +77,15 @@ def find_row_col_neighbor(lat0, lon0, da, orog_arr, di, dj):
     elev = float(orog_arr[i,j]) if orog_arr is not None else np.nan
     return i, j, elev, latn, lonn, dist
 
-def mask_nan(arrays):
-    """
-    Given a list of 1-D NumPy arrays, drop any time-steps where ANY array is NaN.
-    Returns (masked_arrays, boolean_mask).
-    """
-    if not arrays or arrays[0].size == 0:
-        return [], np.array([], dtype=bool)
-    mask = np.ones(arrays[0].shape, dtype=bool)
-    for a in arrays:
-        mask &= ~np.isnan(a)
-    return [a[mask] for a in arrays], mask
-
 #-------------------------------------------------------------------------------
 
 def cara_interp(lat0, lon0, elev0, ds, real_var, std_var):
     """
-    3×3 Gaussian‐weighted interpolation + dynamic lapse‐rate for t2m.
-    Returns a pandas.Series (daily‐resampled).
+    3×3 Gaussian‐weighted interpolation +
+    dynamic lapse‐rate for t2m only if orography is present.
+    Returns a pandas.Series, daily‐resampled.
     """
-    # 1) Prepare the data array, squeeze vertical dims
+    # 1) Prepare variable array
     da = ds[real_var]
     for d in ("height","level","heightAboveGround"):
         if d in da.dims:
@@ -115,10 +100,10 @@ def cara_interp(lat0, lon0, elev0, ds, real_var, std_var):
                 og = og.squeeze({d:1}, drop=True)
         orog_arr = og.values
 
-    arr   = da.values.astype(float)                # (time, lat, lon)
-    times = pd.to_datetime(da["time"].values)      # length T
+    arr   = da.values.astype(float)               # shape (time, lat, lon)
+    times = pd.to_datetime(da["time"].values)     # length T
 
-    # 3) Gather 3×3 neighbors: values, elevation diffs & horizontal distances
+    # 3) Gather 3×3 neighbours
     neigh_vals = []
     dz         = []
     dists      = []
@@ -127,7 +112,7 @@ def cara_interp(lat0, lon0, elev0, ds, real_var, std_var):
         i, j, cell_elev, _, _, dist = find_row_col_neighbor(
             lat0, lon0, da, orog_arr, di, dj
         )
-        vals = da.isel(lat=i, lon=j).values.astype(float)  # shape (time,)
+        vals = da.isel(lat=i, lon=j).values.astype(float)  # (time,)
         neigh_vals.append(vals)
         dz.append(cell_elev - elev0)
         dists.append(dist)
@@ -136,30 +121,28 @@ def cara_interp(lat0, lon0, elev0, ds, real_var, std_var):
     dz         = np.array(dz)           # shape (9,)
     dists      = np.array(dists)        # shape (9,)
 
-    # 4) Compute time‐varying lapse‐rate by fitting temp vs. dz at each t
-    T = neigh_vals.shape[1]
-    slopes = np.full(T, LAPSE, dtype=float)
+    # 4–5) **Only for temperature** and **only if** we have orog ⇒ dynamic lapse‐rate
+    if std_var == "t2m" and orog_arr is not None:
+        T = neigh_vals.shape[1]
+        slopes = np.full(T, LAPSE, dtype=float)
+        for t in range(T):
+            y  = neigh_vals[:, t]
+            ok = ~np.isnan(y) & ~np.isnan(dz)
+            if ok.sum() >= 2:
+                try:
+                    slopes[t], _ = np.polyfit(dz[ok], y[ok], 1)
+                except np.linalg.LinAlgError:
+                    slopes[t] = LAPSE
+        corrected = neigh_vals - slopes[None, :] * dz[:, None]
+    else:
+        # either not t2m or no orog ⇒ no vertical adjustment
+        corrected = neigh_vals
 
-    for t in range(T):
-        y = neigh_vals[:, t]
-        ok = ~np.isnan(y) & ~np.isnan(dz)
-        if ok.sum() >= 2:
-            try:
-                slopes[t], _ = np.polyfit(dz[ok], y[ok], 1)
-            except np.linalg.LinAlgError:
-                slopes[t] = LAPSE
-        else:
-            slopes[t] = LAPSE
-
-    # 5) Apply that slope correction to each neighbor series
-    #    corrected[k, t] = y_k(t) - slope(t) * dz[k]
-    corrected = neigh_vals - slopes[None, :] * dz[:, None]
-
-    # 6) Compute horizontal Gaussian weights from dists
+    # 6) Horizontal Gaussian weights
     wts = np.exp(-0.5 * (dists / Rp)**2)
     wts /= wts.sum()
 
-    # 7) Weighted sum across neighbors → time series
+    # 7) Weighted sum → raw timeseries
     ts = corrected.T.dot(wts)  # shape (T,)
 
     # 8) Wrap in pandas.Series + daily resample
@@ -190,7 +173,7 @@ if __name__ == "__main__":
         ds = shift_and_fix_coords(ds)
         real_var, std_var = extract_variable(ds, fname)
 
-        # dims check + squeeze any leftover vertical dims
+        # dims check + squeeze vertical dims
         da = ds[real_var]
         for d in ("height","level"):
             if d in da.dims:
@@ -200,6 +183,7 @@ if __name__ == "__main__":
             ds.close()
             continue
 
+        # process each station
         for station_name, info in STATIONS.items():
             print(f"{LOG}  → Station `{station_name}`")
             series = cara_interp(
@@ -223,3 +207,4 @@ if __name__ == "__main__":
         ds.close()
 
     print(f"\n{LOG} all done.")
+
