@@ -67,7 +67,7 @@ plt.show()
 # --- Plot 3: Scatter Plot ---
 plt.figure(figsize=(6, 6))
 plt.scatter(aligned['In_Situ'], aligned['CARRA'], alpha=0.5)
-plt.title("Fig 3.1.2 – Scatter: CARRA vs Baseline In Situ Precipitation (Þverfjall)")
+plt.title("Fig 3.1.3 – Scatter: CARRA vs Baseline In Situ Precipitation (Þverfjall)")
 plt.xlabel("In Situ (0 mm)")
 plt.ylabel("CARRA (mm)")
 plt.grid(True)

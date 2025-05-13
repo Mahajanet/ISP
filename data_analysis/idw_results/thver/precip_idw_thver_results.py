@@ -29,7 +29,7 @@ plt.figure(figsize=(15,5))
 plt.plot(idw_daily.index,    idw_daily,    label="IDW CARRA (thver)", color="tab:orange", lw=1)
 plt.plot(in_situ_zero.index, in_situ_zero, label="In Situ (no data)", linestyle="--", color="tab:gray")
 
-plt.title("Daily Precipitation: IDW‐Interpolated CARRA vs In Situ (Þverá, Station 2636)")
+plt.title("Fig 3.2.3 Daily Precipitation: IDW‐Interpolated CARRA vs In Situ (Þverá, Station 2636)")
 plt.xlabel("Date")
 plt.ylabel("Precipitation (mm)")
 plt.legend()
