@@ -29,7 +29,7 @@ plt.figure(figsize=(15,5))
 plt.plot(carra_daily.index,   carra_daily,   label="CARRA (elev-adj)", color="tab:blue", lw=1)
 plt.plot(in_situ_zero.index,  in_situ_zero,  label="In Situ (no data)", linestyle="--", color="tab:gray")
 
-plt.title("Daily Precipitation: Elev-Adjusted CARRA vs In Situ (Þverá, Station 2636)")
+plt.title("Fig 3.4.3 Daily Precipitation: Elev-Adjusted CARRA vs In Situ (Þverá, Station 2636)")
 plt.xlabel("Date")
 plt.ylabel("Precipitation (mm)")
 plt.legend()
