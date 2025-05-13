@@ -44,7 +44,7 @@ plt.plot(
     color="tab:gray"
 )
 
-plt.title("Daily Precipitation: Kriging CARRA vs In Situ (Þverá, Station 2636)")
+plt.title("Fig 3.5.3 Daily Precipitation: Kriging CARRA vs In Situ (Þverá, Station 2636)")
 plt.xlabel("Date")
 plt.ylabel("Precipitation (mm)")
 plt.legend()
