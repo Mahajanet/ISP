@@ -34,7 +34,7 @@ plt.plot(
     label="In Situ (no data)", linestyle="--", color="tab:gray"
 )
 
-plt.title("Daily Precipitation: Gaussian CARRA vs In Situ (Þverá, Station 2636)")
+plt.title("Fig 3.3.3 Daily Precipitation: Gaussian CARRA vs In Situ (Þverá, Station 2636)")
 plt.xlabel("Date")
 plt.ylabel("Precipitation (mm)")
 plt.legend()
